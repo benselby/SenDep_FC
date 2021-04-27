@@ -1,0 +1,6 @@
+data/inputs/*
+data/outputs/*
+data/results/*
+!data/inputs/masks/rsMNI.nii
+!data/inputs/*.json
+
