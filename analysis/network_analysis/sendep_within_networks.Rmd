@@ -1,0 +1,176 @@
+---
+title: "SenDep Within-Networks FC Analysis"
+author: "Ben S"
+date: "March 28, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+packages <- c("corrr",
+              "dplyr",
+              "effsize",
+              "tableone",
+              "tidyverse",
+              "interactions",
+              "kableExtra",
+              "igraph", 
+              "reshape",
+              "ggpubr")
+
+# install missing packages
+installed <- packages %in% rownames(installed.packages())
+if (any(installed == FALSE)){
+  install.packages(packages[!installed])
+}
+
+# load all packages
+invisible(lapply(packages, library, character.only=TRUE))
+
+renv::snapshot()
+```
+
+```{r data prep}
+
+# Read LC/demographic data: 
+demo <- read.csv("/scratch/bselby/SENDEP/NM_MRI/LC_stats_Oct12.csv")
+demo$Diagnosis <- factor(demo$Diagnosis, levels=c(1,2), labels=c('LLD', 'HC'))
+demo$Sex <- factor(demo$Sex, levels=c(1,2), labels=c('female', 'male'))
+
+# read in time series data
+# e.g. SEN112_ses-01_task-rest_avg_atlas-ColeAnticevic_netassignments_LR_meants.csv
+files_ts <- list.files(path="/projects/bselby/fc_LC/data/outputs/ciftify_meants", 
+                       recursive=T, full.names=T, 
+                       pattern="^SEN.*_ses-01_task-rest_avg_atlas-ColeAnticevic_parcels_LR_meants\\.csv$")
+
+# confirm csvs aren't empty
+#files_pns_ts[file.size(files_pns_ts) > 0]
+
+# read in files
+time_series <- lapply(files_ts, read.csv, header=F)
+
+# transpose dfs
+time_series <- lapply(time_series, t)
+
+# Name dfs with participant IDs
+names(time_series) <- substring(files_ts,52,57)
+
+# read in ROI labels (718) - ask Lindsay where this came from/verify it's correct!
+rois <- read.csv(file = "/projects/loliver/PNS_pilot/data/fmri/CortexSubcortex_ColeAnticevic_NetPartition_wSubcorGSR_parcels_LR_sorted_labels.csv")
+
+networks <- c("Vis1","Vis2","SM","CiOp","DAtt","Lang","FrP","Aud","DMN","PMult","VMult","OAff")
+
+# add labels to df columns
+for (i in names(time_series)) {
+  colnames(time_series[[i]]) <- rois$LABEL
+}
+
+```
+
+``` {r Basic analysis}
+
+# Generate Pearson correlation matrices for each participant and set upper triangle to NAs
+correlate <- time_series %>% lapply(correlate, quiet=T) %>% lapply(shave, upper=T)
+
+# create dfs with corrs for each participant, then create merged edge variable 
+cor_str <- correlate %>% lapply(stretch, na.rm=T)
+cor_df <- cor_str %>% lapply(unite, col="edge", 1:2, sep="-", remove=T) %>% lapply(data.frame)
+edge_names <- as.vector(cor_df[[1]][,"edge"])
+
+# Transpose dfs and rename columns
+for (i in names(cor_df)) {
+  cor_df[[i]] <- t(data.frame(cor_df[[i]][,"r"]))
+  colnames(cor_df[[i]]) <- edge_names
+}
+
+# bind rows across df list to generate tibble with all corrs for each participant
+corrs <- data.frame(do.call("rbind", cor_df))
+
+# fisher z transform corrs and add ids
+# TODO: understand why is Fisher z transform important?
+corrs_z  <- atanh(corrs)
+corrs_z$record_id <- names(cor_df)
+
+## Run t-tests on connectivity data and calculate cohen's d
+
+# Merge demographic/LC data with connectivity
+df <- merge(demo, corrs_z, by="record_id") 
+
+table_one_base <- CreateTableOne(data=df[,c("Sex","Age")])  
+table_base = print(table_one_base)
+
+# t-tests and cohen's d for Diagnosis
+conn_diffs <- data.frame(t(sapply(df[, 31:length(colnames(df))], function(x) 
+     unlist(t.test(x~df$Diagnosis)[c("estimate","p.value","statistic","conf.int")]))))
+
+# Try applying FDR correction 
+conn_diffs[p.adjust(conn_diffs$p.value, method = "fdr") < .05,] # none survive fdr correction
+
+conn_effs <- data.frame(t(sapply(df[, 31:length(colnames(df))], function(x) 
+     unlist(cohen.d(x~df$Diagnosis)[c("estimate","conf.int","magnitude")]))))
+
+# sig at p < .05 or cohen's d of >= 0.5 (equivalent to an f of 0.25, per the grant) - actually only need d of .25 for Aim 2 (f of .125) - TODO: what thresholds do we need/are appropriate for this exploratory analysis? Ask yuliya: what kind of stats would she want to report for a proposal (p values, cohens d)
+conn_sig <- conn_diffs[conn_diffs$p.value<.05,]
+conn_medeff <- conn_effs[conn_effs$estimate<=-.25 | conn_effs$estimate>=.25,]
+
+```
+
+```{r Within Networks plotting, message=FALSE, warning=FALSE}
+within_means <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_[LR].Ctx.", net, ".\\d{2}_[LR].Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means[, ncol(within_means)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  print(paste(net, ncol(within_net)))
+}
+
+within_means_L <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_L.Ctx.", net, ".\\d{2}_L.Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means_L[, ncol(within_means_L)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  print(paste(net, ncol(within_net)))
+}
+
+within_means_R <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_R.Ctx.", net, ".\\d{2}_R.Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means_R[, ncol(within_means_R)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  print(paste(net, ncol(within_net)))
+}
+
+within_means %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+within_means_R %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "RIGHT Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+within_means_L %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "LEFT Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+``` {r Group comparisons}
+wdf <- merge(demo, within_means, by="record_id")
+
+for (net in networks){
+  col_name = paste0(net, "_mean")
+  p <- ggboxplot(wdf, x="Diagnosis", y=col_name, color="Diagnosis", add="jitter") + 
+    stat_compare_means(method = "t.test")
+  print(p)
+}
+```

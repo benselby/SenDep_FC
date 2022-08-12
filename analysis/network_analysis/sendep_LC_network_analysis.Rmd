@@ -1,0 +1,179 @@
+---
+title: "SenDep FC Network Analysis and LC"
+author: "Ben S"
+date: "February 11, 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+packages <- c("corrr",
+              "dplyr",
+              "effsize",
+              "tableone",
+              "tidyverse",
+              "interactions",
+              "kableExtra",
+              "backports", "broom", "bslib", "clipr", "cpp11", "DBI", "digest", "dtplyr",
+	            "evaluate", "fs", "jsonlite", "knitr", "openssl", "Rcpp", "readr",
+	            "rmarkdown", "sass", "stringi", "tidyr", "tinytex", "TSP", "vroom",
+	            "withr", "xfun", "xml2", "yaml")
+
+# install missing packages
+installed <- packages %in% rownames(installed.packages())
+if (any(installed == FALSE)){
+  install.packages(packages[!installed])
+}
+
+# load all packages
+invisible(lapply(packages, library, character.only=TRUE))
+
+```
+
+
+```{r data prep}
+
+# Read LC/demographic data: 
+demo <- read.csv("/scratch/bselby/SENDEP/NM_MRI/LC_stats_Oct12.csv")
+
+# read in time series data
+# e.g. SEN112_ses-01_task-rest_avg_atlas-ColeAnticevic_netassignments_LR_meants.csv
+files_ts <- list.files(path="/projects/bselby/fc_LC/data/outputs/ciftify_meants", 
+                       recursive=T, full.names=T, 
+                       pattern="^SEN.*_ses-01_task-rest_avg_atlas-ColeAnticevic_netassignments_LR_meants\\.csv$")
+
+# confirm csvs aren't empty
+#files_pns_ts[file.size(files_pns_ts) > 0]
+
+# read in files
+time_series <- lapply(files_ts, read.csv, header=F)
+
+# transpose dfs
+time_series <- lapply(time_series, t)
+
+# Name dfs with participant IDs
+names(time_series) <- substring(files_ts,52,57)
+
+# ROI labels - TODO: double check these are appropriate (ripped from Lindsay's script) - where do they come from? What do they mean?
+rois <- c("Vis1","Vis2","SM","CiOp","DAtt","Lang","FrP","Aud","DMN","PMult","VMult","OAff")
+
+# add labels to df columns
+for (i in names(time_series)) {
+  colnames(time_series[[i]]) <- rois
+}
+
+# Generate Pearson correlation matrices for each participant and set upper triangle to NAs
+correlate <- time_series %>% lapply(correlate, quiet=T) %>% lapply(shave, upper=T)
+
+# create dfs with corrs for each participant, then create merged edge variable 
+cor_str <- correlate %>% lapply(stretch, na.rm=T)
+cor_df <- cor_str %>% lapply(unite, col="edge", 1:2, sep="-", remove=T) %>% lapply(data.frame)
+edge_names <- as.vector(cor_df[[1]][,"edge"])
+
+# Transpose dfs and rename columns
+for (i in names(cor_df)) {
+  cor_df[[i]] <- t(data.frame(cor_df[[i]][,"r"]))
+  colnames(cor_df[[i]]) <- edge_names
+}
+
+# bind rows across df list to generate tibble with all corrs for each participant
+corrs <- data.frame(do.call("rbind", cor_df))
+
+# fisher z transform corrs and add ids
+# TODO: understand why is Fisher z transform important?
+corrs_z  <- atanh(corrs)
+corrs_z$record_id <- names(cor_df)
+
+## Run t-tests on connectivity data and calculate cohen's d
+
+# Merge demographic/LC data with connectivity
+df <- merge(demo, corrs_z, by="record_id") 
+df$Diagnosis <- factor(df$Diagnosis, levels=c(1,2), labels=c('LLD', 'HC'))
+df$Sex <- factor(df$Sex, levels=c(1,2), labels=c('female', 'male'))
+
+########### TODO: this is where stuff starts to really diverge - need to break down and understand each line ##############
+# table one - TODO update sex/compare to Lindsay's data
+table_one_base <- CreateTableOne(data=df[,c("Sex","Age")])  
+table_base = print(table_one_base)
+
+df_rois <- df %>% select(contains(rois))
+
+# t-tests and cohen's d for Diagnosis
+conn_diffs <- data.frame(t(sapply(df_rois, function(x) 
+     unlist(t.test(x~df$Diagnosis)[c("estimate","p.value","statistic","conf.int")]))))
+
+# Try applying FDR correction 
+conn_diffs[p.adjust(conn_diffs$p.value, method = "fdr") < .05,] # none survive fdr correction
+
+conn_effs <- data.frame(t(sapply(df_rois, function(x) 
+     unlist(cohen.d(x~df$Diagnosis)[c("estimate","conf.int","magnitude")]))))
+
+# sig at p < .05 or cohen's d of >= 0.5 (equivalent to an f of 0.25, per the grant) - actually only need d of .25 for Aim 2 (f of .125) - TODO: what thresholds do we need/are appropriate for this exploratory analysis? Ask yuliya: what kind of stats would she want to report for a proposal (p values, cohens d)
+conn_sig <- conn_diffs[conn_diffs$p.value<.05,]
+conn_medeff <- conn_effs[conn_effs$estimate<=-.25 | conn_effs$estimate>=.25,]
+
+```
+
+```{r LC NM signal correlations, warning=FALSE}
+# First, let's try plotting the data
+
+LC_metric <- "LC_avg_all"
+
+for (networks in names(df_rois)){
+  print(ggplot(df, aes_string(x=LC_metric, y=networks)) + geom_point(color="#0072B2") + 
+    ggtitle(networks) +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="top",
+          axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5)))
+}
+
+ggplotRegression <- function (fit, colour='red', save_out=FALSE) {
+  require(ggplot2)
+  print(
+    ggplot(fit$model, aes_string(x = names(fit$model)[2], y = names(fit$model)[1])) + 
+      geom_point() +
+      stat_smooth(method = "lm", col = colour) +
+      labs(title = paste("Adj R2 = ",signif(summary(fit)$adj.r.squared, 5),
+                         "Intercept =",signif(fit$coef[[1]],5 ),
+                         " Slope =",signif(fit$coef[[2]], 5),
+                         " P =",signif(summary(fit)$coef[2,4], 5)))
+  )
+  if (save_out==TRUE){
+    ggsave(paste0(names(fit$model)[1], "_", names(fit$model)[2], ".png" ))
+  }
+}
+
+# Plot basic linear models for each network pair
+## Todo: figure out why some correlation values are greater than 1?
+# for (net_pair in names(df_rois)){
+#   fit <- lm(paste(net_pair, "~", LC_metric), data=df)
+#   if (signif(summary(fit)$coeff[2,4], 5) < 0.05){
+#     ggplotRegression(fit, save_out=FALSE)  
+#     print(summary(fit))
+#   }
+# }
+
+int_table <- tibble(pair = character(), int_coeff=numeric(), int_unc_p=numeric())
+
+# Interaction plots -  see https://cran.r-project.org/web/packages/interactions/vignettes/interactions.html
+for (net_pair in names(df_rois)){
+  f <- paste(net_pair, "~", LC_metric, "* Diagnosis") 
+  fit_int <- lm(f, data=df)
+  int_p <- signif(summary(fit_int)$coeff[4,4], 5) # interaction p-value
+  if (int_p < 0.05){
+    print(interact_plot(fit_int, pred=LC_avg_all, modx=Diagnosis, plot.points=TRUE,
+                        main.title=paste("Interaction p-value: ", int_p)))
+    # print(f)  
+    # print(summary(fit_int))
+    new <- tibble(pair=net_pair, int_coeff=summary(fit_int)$coeff[4,1], int_unc_p=int_p)
+    int_table = bind_rows(int_table, new)
+  }
+}
+
+int_table %>%  
+  mutate(int_fdr_p=p.adjust(int_unc_p, method="fdr")) %>% 
+  kable(col.names = c("Network Pair", "Interaction coefficient", "Uncorrected p-value", "FDR corrected p-value")) %>%
+  kable_styling("hover", "condensed") 
+
+# Correlation of parcel corrs with LC NM signal 
+conn_LC_max <- data.frame(t(sapply(df_rois, function(x) 
+    unlist(correlate(x, df$LC_max_all)))))
+```

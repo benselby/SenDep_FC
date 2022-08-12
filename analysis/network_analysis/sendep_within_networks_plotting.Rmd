@@ -1,0 +1,122 @@
+---
+title: "SenDep Within-Networks FC Plotting"
+author: "Ben S"
+date: "April 2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+renv::activate()
+packages <- c("corrr",
+              "dplyr",
+              "effsize",
+              "tableone",
+              "tidyverse",
+              "interactions",
+              "kableExtra",
+              "igraph", 
+              "reshape",
+              "ggpubr")
+
+# install missing packages
+installed <- packages %in% rownames(installed.packages())
+if (any(installed == FALSE)){
+  install.packages(packages[!installed])
+}
+
+# load all packages
+invisible(lapply(packages, library, character.only=TRUE))
+
+renv::snapshot()
+```
+
+## Total mean correlation within networks
+
+```{r Within Networks plotting, message=FALSE, warning=FALSE}
+
+# Load the data
+# load("/mnt/tigrlab/projects/bselby/fc_LC/analysis/.RData")
+load("/mnt/tigrlab/projects/bselby/fc_LC/analysis/network_analysis/plot_data.RData")
+
+within_means <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_[LR].Ctx.", net, ".\\d{2}_[LR].Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means[, ncol(within_means)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  # print(paste(net, ncol(within_net)))
+}
+
+within_means_L <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_L.Ctx.", net, ".\\d{2}_L.Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means_L[, ncol(within_means_L)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  # print(paste(net, ncol(within_net)))
+}
+
+within_means_R <- data.frame(record_id=names(time_series))
+for (net in networks){
+  re = paste0(net, ".\\d{2}_R.Ctx.", net, ".\\d{2}_R.Ctx") # select only within network edges
+  within_net <- corrs_z %>% select(matches(re)) 
+  within_means_R[, ncol(within_means_R)+1] <- within_net %>% transmute("{net}_mean" := rowMeans(across(where(is.numeric))))
+  # print(paste(net, ncol(within_net)))
+}
+
+within_means %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+within_means_R %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "RIGHT Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+within_means_L %>% reshape::melt() %>%
+    ggplot(aes(x = factor(variable), y = value)) +
+      geom_boxplot(outlier.colour = NA) + geom_jitter(alpha = 0.5) +
+      labs(title = "LEFT Within Cortical Network Correlation for all SenDep participants",
+      x = NULL, y = "Mean Edgewise Correlation (Z Transformed)") +
+      theme_minimal() +
+      theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+## T-tests
+
+``` {r Group comparisons}
+wdf <- merge(demo, within_means, by="record_id")
+
+for (net in networks){
+  col_name = paste0(net, "_mean")
+  p <- ggboxplot(wdf, x="Diagnosis", y=col_name, color="Diagnosis", add="jitter") + 
+    stat_compare_means(method = "t.test")
+  print(p)
+}
+```
+
+## Interaction plots
+
+``` {r interaction plots}
+# Interaction plots -  see https://cran.r-project.org/web/packages/interactions/vignettes/interactions.html
+for (net in networks){
+  f <- paste0(net, "_mean ~ LC_avg_all * Diagnosis") 
+  fit_int <- lm(f, data=wdf)
+  int_p <- signif(summary(fit_int)$coeff[4,4], 5) # interaction p-value
+  if (int_p < 1){
+    print(interact_plot(fit_int, pred=LC_avg_all, modx=Diagnosis, plot.points=TRUE,
+                        main.title=paste("Interaction p-value: ", int_p)))
+    # print(f)  
+    # print(summary(fit_int))
+    new <- tibble(pair=net_pair, int_coeff=summary(fit_int)$coeff[4,1], int_unc_p=int_p)
+    int_table = bind_rows(int_table, new)
+  }
+}
+```
